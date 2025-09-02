@@ -66,8 +66,6 @@ type State = Readonly<{
     birbPosition: number;
     birbVelocity: number;
     birbLives: number;
-    gapY: number[];
-    gapHeight: number[];
     timeStart: number;
     elapsedTime: number;
     pipeRead?: Pipe[];
@@ -79,8 +77,6 @@ const initialState: State = {
     birbPosition: 200,
     birbVelocity: 0,
     birbLives: 3,
-    gapY: [],
-    gapHeight: [],
     timeStart: performance.now(),
     elapsedTime: 0,
 };
