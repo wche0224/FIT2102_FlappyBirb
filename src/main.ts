@@ -12,6 +12,7 @@
  * Document your code!
  */
 
+import { constants } from "buffer";
 import "./style.css";
 
 import {
@@ -44,6 +45,7 @@ const Birb = {
 const Constants = {
     PIPE_WIDTH: 50,
     TICK_RATE_MS: 16, // Might need to change this!
+    PIPE_TRAVEL_MS: 3000,
 } as const;
 
 // User input
@@ -51,16 +53,25 @@ const Constants = {
 type Key = "Space";
 
 // State processing
+type Pipe = Readonly<{
+    gapY: number;
+    gapHeight: number;
+    time: number;
+    age: number;
+    xpos: number;
+}>;
 
 type State = Readonly<{
     gameEnd: boolean;
     birbPosition: number;
     birbVelocity: number;
     birbLives: number;
-    gapY: number;
-    gapHeight: number;
-    time: number;
-    pipeX: number;
+    gapY: number[];
+    gapHeight: number[];
+    timeStart: number;
+    elapsedTime: number;
+    pipeRead?: Pipe[];
+    pipeRendering?: Pipe[];
 }>;
 
 const initialState: State = {
@@ -68,17 +79,11 @@ const initialState: State = {
     birbPosition: 200,
     birbVelocity: 0,
     birbLives: 3,
-    gapY: 0,
-    gapHeight: 0,
-    time: 0,
-    pipeX: Viewport.CANVAS_WIDTH,
+    gapY: [],
+    gapHeight: [],
+    timeStart: performance.now(),
+    elapsedTime: 0,
 };
-
-type Pipe = Readonly<{
-    gapY: number;
-    gapHeight: number;
-    time: number;
-}>;
 
 /**
  * Updates the state by proceeding with one time step.
@@ -151,6 +156,15 @@ const render = (): ((s: State) => void) => {
         "viewBox",
         `0 0 ${Viewport.CANVAS_WIDTH} ${Viewport.CANVAS_HEIGHT}`,
     );
+
+    const removePipe = () => {
+        const allPipesRendering = svg.querySelectorAll("rect");
+        const pipesToRemove = [
+            allPipesRendering.item(0),
+            allPipesRendering.item(1),
+        ];
+        pipesToRemove.forEach(p => svg.removeChild(p));
+    };
     /**
      * Renders the current state to the canvas.
      *
@@ -159,12 +173,10 @@ const render = (): ((s: State) => void) => {
      * @param s Current state
      */
 
-    const previousBirdImg = svg.querySelector("image"); // Select the old bird image
-    if (previousBirdImg) {
-        svg.removeChild(previousBirdImg); // Remove the old bird image from the canvas
-    }
-
     return (s: State) => {
+        const prev = svg.querySelector("image");
+        if (prev) svg.removeChild(prev);
+
         // Add birb to the main grid canvas
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
@@ -176,29 +188,42 @@ const render = (): ((s: State) => void) => {
         svg.appendChild(birdImg);
 
         // Draw a static pipe as a demonstration
-        const pipeGapY = s.gapY * Viewport.CANVAS_HEIGHT; // vertical center of the gap
-        const pipeGapHeight = s.gapHeight * Viewport.CANVAS_HEIGHT;
+        const prevPipes = svg.querySelectorAll("rect");
+        if (prevPipes) prevPipes.forEach(n => n.remove());
 
-        // Top pipe
-        const pipeTop = createSvgElement(svg.namespaceURI, "rect", {
-            x: "150",
-            y: "0",
-            width: `${Constants.PIPE_WIDTH}`,
-            height: `${(pipeGapY - pipeGapHeight) / 2}`,
-            fill: "green",
-        });
+        const pipesOnCanvas = s.pipeRendering;
 
-        // Bottom pipe
-        const pipeBottom = createSvgElement(svg.namespaceURI, "rect", {
-            x: "150",
-            y: `${pipeGapY + pipeGapHeight / 2}`,
-            width: `${Constants.PIPE_WIDTH}`,
-            height: `${Viewport.CANVAS_HEIGHT - (s.gapY + s.gapHeight / 2)}`,
-            fill: "green",
-        });
+        if (pipesOnCanvas) pipesOnCanvas.forEach(createWholePipe);
 
-        // svg.appendChild(pipeTop);
-        // svg.appendChild(pipeBottom);
+        function createWholePipe(p: Pipe): void {
+            const pipeConvertedGap = p.gapY * Viewport.CANVAS_HEIGHT;
+            const pipeConvertedHeight = p.gapHeight * Viewport.CANVAS_HEIGHT;
+
+            const topH = pipeConvertedGap - pipeConvertedHeight / 2;
+            const bottomY = pipeConvertedGap + pipeConvertedHeight / 2;
+            const bottomH = Viewport.CANVAS_HEIGHT - bottomY;
+
+            // Top pipe
+            const pipeTop = createSvgElement(svg.namespaceURI, "rect", {
+                x: `${p.xpos}`,
+                y: "0",
+                width: `${Constants.PIPE_WIDTH}`,
+                height: `${topH}`,
+                fill: "green",
+            });
+
+            // Bottom pipe
+            const pipeBottom = createSvgElement(svg.namespaceURI, "rect", {
+                x: `${p.xpos}`,
+                y: `${bottomY}`,
+                width: `${Constants.PIPE_WIDTH}`,
+                height: `${bottomH}`,
+                fill: "green",
+            });
+
+            svg.appendChild(pipeTop);
+            svg.appendChild(pipeBottom);
+        }
     };
 };
 
@@ -213,7 +238,9 @@ export const state$ = (csvContents: string): Observable<State> => {
             return {
                 gapY: Number(rows[0]),
                 gapHeight: Number(rows[1]),
-                time: Number(rows[2]),
+                time: Number(rows[2]) * 1000,
+                age: 0,
+                xpos: Viewport.CANVAS_WIDTH,
             };
         });
 
@@ -233,30 +260,48 @@ export const state$ = (csvContents: string): Observable<State> => {
         Constants.TICK_RATE_MS,
     ).pipe(
         map(_ => (s: State) => {
-            const gravity = 1;
-            const newBirbvelocity = s.birbVelocity + gravity;
-            const newBirbposition = s.birbPosition + newBirbvelocity;
+            const gravity = 0.75;
+            const newBirbVelocity = s.birbVelocity + gravity;
+            const newBirbPositionUnbound = s.birbPosition + newBirbVelocity;
+            const floor = Viewport.CANVAS_HEIGHT - Birb.HEIGHT;
 
-            if (newBirbposition <= 0 || newBirbposition <= s.gapHeight) {
-                return {
-                    ...s,
-                    birbPosition: 0,
-                    birbVelocity: newBirbvelocity,
-                };
-            }
+            const newBirbPosition =
+                newBirbPositionUnbound <= 0
+                    ? 0
+                    : newBirbPositionUnbound >= floor
+                      ? floor
+                      : newBirbPositionUnbound;
 
-            if (newBirbposition >= Viewport.CANVAS_HEIGHT - Birb.HEIGHT) {
-                return {
-                    ...s,
-                    birbPosition: Viewport.CANVAS_HEIGHT - Birb.HEIGHT,
-                    birbVelocity: newBirbvelocity,
-                };
-            }
+            const pipeQueue: Pipe[] = pipeProperties; //read the csv content at the start, otherwise continue from previous state
+            const currentTime = performance.now() - s.timeStart;
+
+            const travel = Constants.PIPE_TRAVEL_MS; // ms
+            const distance = Viewport.CANVAS_WIDTH + Constants.PIPE_WIDTH; // px
+
+            const nextPipe = pipeQueue
+                .filter(p => p.time <= currentTime)
+                .map(p => {
+                    const age = currentTime - p.time; // can be < 0 before spawn, so it will not just spawn at s.time >= p.time
+                    const rawProgress = age / travel; // progress represented as ratio
+                    const clampedProgress =
+                        rawProgress <= 0
+                            ? 0
+                            : rawProgress >= 1
+                              ? 1
+                              : rawProgress; // clamp to progress to [0,1]
+                    const xpos =
+                        Viewport.CANVAS_WIDTH - distance * clampedProgress; // right → left past edge
+                    return { ...p, age, xpos };
+                })
+                .filter(p => p.age >= 0 && p.age <= travel); // only pipes on screen
 
             return {
                 ...s,
-                birbPosition: newBirbposition,
-                birbVelocity: newBirbvelocity,
+                birbPosition: newBirbPosition,
+                birbVelocity: newBirbVelocity,
+                elapsedTime: currentTime,
+                pipeRead: pipeQueue,
+                pipeRendering: nextPipe,
             };
         }),
     );
