@@ -40,6 +40,7 @@ const Viewport = {
 const Birb = {
     WIDTH: 42,
     HEIGHT: 30,
+    GRAVITY: 0.75,
 } as const;
 
 const Constants = {
@@ -47,6 +48,12 @@ const Constants = {
     TICK_RATE_MS: 16, // Might need to change this!
     PIPE_TRAVEL_MS: 3000,
 } as const;
+
+const Bounce = {
+    SPREAD: 3,
+    MEAN: 5, //mean to spread from
+    SEED: 1234,
+};
 
 // User input
 
@@ -59,6 +66,8 @@ type Pipe = Readonly<{
     time: number;
     age: number;
     xpos: number;
+    birdPassing: boolean;
+    passed: boolean;
 }>;
 
 type State = Readonly<{
@@ -68,8 +77,13 @@ type State = Readonly<{
     birbLives: number;
     timeStart: number;
     elapsedTime: number;
+    score: number;
+    gameOver: boolean;
     pipeRead?: Pipe[];
     pipeRendering?: Pipe[];
+    pipeHistory?: Pipe[];
+    pipePassing?: Pipe;
+    rngSeed: number;
 }>;
 
 const initialState: State = {
@@ -79,6 +93,9 @@ const initialState: State = {
     birbLives: 3,
     timeStart: performance.now(),
     elapsedTime: 0,
+    score: 0,
+    gameOver: false,
+    rngSeed: Bounce.SEED,
 };
 
 /**
@@ -115,6 +132,18 @@ const show = (elem: SVGElement): void => {
 const hide = (elem: SVGElement): void => {
     elem.setAttribute("visibility", "hidden");
 };
+
+abstract class RNG {
+    private static m = 0x80000000; // 2^31
+    private static a = 1103515245;
+    private static c = 12345;
+
+    public static hash = (seed: number): number =>
+        (RNG.a * seed + RNG.c) % RNG.m;
+
+    public static scale = (hash: number): number =>
+        (2 * hash) / (RNG.m - 1) - 1; // in [-1, 1]
+}
 
 /**
  * Creates an SVG element with the given properties.
@@ -153,14 +182,6 @@ const render = (): ((s: State) => void) => {
         `0 0 ${Viewport.CANVAS_WIDTH} ${Viewport.CANVAS_HEIGHT}`,
     );
 
-    const removePipe = () => {
-        const allPipesRendering = svg.querySelectorAll("rect");
-        const pipesToRemove = [
-            allPipesRendering.item(0),
-            allPipesRendering.item(1),
-        ];
-        pipesToRemove.forEach(p => svg.removeChild(p));
-    };
     /**
      * Renders the current state to the canvas.
      *
@@ -170,6 +191,8 @@ const render = (): ((s: State) => void) => {
      */
 
     return (s: State) => {
+        if (s.gameOver) gameOver.setAttribute("visibility", "visible");
+
         const prev = svg.querySelector("image");
         if (prev) svg.removeChild(prev);
 
@@ -220,6 +243,9 @@ const render = (): ((s: State) => void) => {
             svg.appendChild(pipeTop);
             svg.appendChild(pipeBottom);
         }
+
+        scoreText.textContent = String(s.score);
+        livesText.textContent = String(s.birbLives);
     };
 };
 
@@ -237,6 +263,8 @@ export const state$ = (csvContents: string): Observable<State> => {
                 time: Number(rows[2]) * 1000,
                 age: 0,
                 xpos: Viewport.CANVAS_WIDTH,
+                birdPassing: false,
+                passed: false,
             };
         });
 
@@ -247,7 +275,7 @@ export const state$ = (csvContents: string): Observable<State> => {
     const flap$: Observable<(s: State) => State> = fromKey("Space").pipe(
         map(_ => (s: State) => ({
             ...s,
-            birbVelocity: -10,
+            birbVelocity: -9,
         })),
     );
 
@@ -256,48 +284,148 @@ export const state$ = (csvContents: string): Observable<State> => {
         Constants.TICK_RATE_MS,
     ).pipe(
         map(_ => (s: State) => {
-            const gravity = 0.75;
-            const newBirbVelocity = s.birbVelocity + gravity;
-            const newBirbPositionUnbound = s.birbPosition + newBirbVelocity;
+            const updatedBirbVelocity = s.birbVelocity + Birb.GRAVITY;
+            const newBirbPositionUnbound = s.birbPosition + updatedBirbVelocity;
             const floor = Viewport.CANVAS_HEIGHT - Birb.HEIGHT;
 
-            const newBirbPosition =
+            const pipeQueue: Pipe[] = s.pipeRead ?? pipeProperties; //read the csv content at the start, otherwise continue from previous state
+            const currentTime = performance.now() - s.timeStart;
+
+            const travel = Constants.PIPE_TRAVEL_MS; // ms
+            const distance = Viewport.CANVAS_WIDTH + Constants.PIPE_WIDTH; // px
+            const BIRB_X = Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2;
+            const BIRB_REAR = BIRB_X + Birb.WIDTH;
+
+            const pipeQueueUpdated = pipeQueue.map(p => {
+                //we are updating the pipes' property in the queue
+                const age = currentTime - p.time; // can be < 0 before spawn, so it will not just spawn at s.time >= p.time
+                const rawProgress = age / travel; // progress represented as ratio
+                const clampedProgress =
+                    rawProgress <= 0 ? 0 : rawProgress >= 1 ? 1 : rawProgress; // clamp to progress to [0,1]
+                const xpos = Viewport.CANVAS_WIDTH - distance * clampedProgress; // right → left past edge
+                const passed =
+                    BIRB_X - xpos + Constants.PIPE_WIDTH >= 0 ? true : p.passed;
+                const birdPassing =
+                    xpos <= BIRB_REAR && xpos + Constants.PIPE_WIDTH >= BIRB_X
+                        ? true
+                        : false;
+                return { ...p, age, xpos, passed, birdPassing };
+            });
+
+            const pipeQueuePass = pipeQueueUpdated // pipeQueuePass is used to store all pipes that has been rendered, not considering if it is currently rendering
+                .filter(p => p.time <= currentTime);
+
+            const nextPipe = pipeQueuePass.filter(
+                //Array of all pipes currently rendering
+                p => p.age >= 0 && p.age <= travel,
+            ); // only pipes on screen
+
+            const currentPipePassing = pipeQueuePass.find(
+                p => p.birdPassing === true,
+            );
+
+            const scoreUpdate = pipeQueuePass.filter(
+                p => p.passed === true,
+            ).length;
+
+            const velocityAfterBounce = () => {
+                const hashedValue = RNG.hash(s.rngSeed);
+                const scaledValue = RNG.scale(hashedValue);
+                const bounceDownGravity =
+                    Bounce.MEAN + Bounce.SPREAD * scaledValue;
+                const bounceUpGravity =
+                    -Bounce.MEAN + Bounce.SPREAD * scaledValue;
+                return {
+                    bounceDownGravity,
+                    bounceUpGravity,
+                    hashedValue,
+                };
+            };
+
+            const updatedBirbPosition =
                 newBirbPositionUnbound <= 0
                     ? 0
                     : newBirbPositionUnbound >= floor
                       ? floor
                       : newBirbPositionUnbound;
 
-            const pipeQueue: Pipe[] = pipeProperties; //read the csv content at the start, otherwise continue from previous state
-            const currentTime = performance.now() - s.timeStart;
+            const hitCanvas =
+                updatedBirbPosition === floor
+                    ? true
+                    : updatedBirbPosition === 0
+                      ? true
+                      : false;
 
-            const travel = Constants.PIPE_TRAVEL_MS; // ms
-            const distance = Viewport.CANVAS_WIDTH + Constants.PIPE_WIDTH; // px
+            const calcGap = (p: Pipe) => {
+                const pipeConvertedGap = p.gapY * Viewport.CANVAS_HEIGHT;
+                const pipeConvertedHeight =
+                    p.gapHeight * Viewport.CANVAS_HEIGHT;
+                const curPipeGapTop =
+                    pipeConvertedGap - pipeConvertedHeight / 2;
+                const curPipeGapBottom =
+                    pipeConvertedGap + pipeConvertedHeight / 2 - Birb.HEIGHT;
+                return { curPipeGapTop, curPipeGapBottom };
+            };
 
-            const nextPipe = pipeQueue
-                .filter(p => p.time <= currentTime)
-                .map(p => {
-                    const age = currentTime - p.time; // can be < 0 before spawn, so it will not just spawn at s.time >= p.time
-                    const rawProgress = age / travel; // progress represented as ratio
-                    const clampedProgress =
-                        rawProgress <= 0
-                            ? 0
-                            : rawProgress >= 1
-                              ? 1
-                              : rawProgress; // clamp to progress to [0,1]
-                    const xpos =
-                        Viewport.CANVAS_WIDTH - distance * clampedProgress; // right → left past edge
-                    return { ...p, age, xpos };
-                })
-                .filter(p => p.age >= 0 && p.age <= travel); // only pipes on screen
+            const hitPipe =
+                currentPipePassing != undefined
+                    ? updatedBirbPosition <=
+                          calcGap(currentPipePassing).curPipeGapTop ||
+                      updatedBirbPosition >=
+                          calcGap(currentPipePassing).curPipeGapBottom
+                    : false;
+
+            const clampToGap = (p: Pipe, y: number) => {
+                const g = calcGap(p);
+                return y <= g.curPipeGapTop
+                    ? g.curPipeGapTop
+                    : y >= g.curPipeGapBottom
+                      ? g.curPipeGapBottom
+                      : y;
+            };
+
+            const newBirbPosition =
+                hitPipe && currentPipePassing
+                    ? clampToGap(currentPipePassing, updatedBirbPosition)
+                    : updatedBirbPosition;
+
+            const newBirbVelocity =
+                newBirbPosition === updatedBirbPosition //means no pipe collision
+                    ? updatedBirbPosition === newBirbPositionUnbound //means no canvas collision
+                        ? updatedBirbVelocity
+                        : updatedBirbPosition === 0
+                          ? velocityAfterBounce().bounceDownGravity
+                          : velocityAfterBounce().bounceUpGravity
+                    : currentPipePassing
+                      ? newBirbPosition ===
+                        calcGap(currentPipePassing).curPipeGapTop
+                          ? velocityAfterBounce().bounceDownGravity
+                          : velocityAfterBounce().bounceUpGravity
+                      : updatedBirbVelocity;
+
+            const newBirbLives =
+                hitCanvas || hitPipe
+                    ? s.birbLives - 1 <= 0
+                        ? 0
+                        : s.birbLives - 1
+                    : s.birbLives;
+
+            const newGameOver: boolean = newBirbLives === 0 ? true : false; //false if game is still ongoing, true if lost
+
+            const rngSeed2 =
+                hitCanvas || hitPipe ? RNG.hash(s.rngSeed) : s.rngSeed;
 
             return {
                 ...s,
                 birbPosition: newBirbPosition,
                 birbVelocity: newBirbVelocity,
+                birbLives: newBirbLives,
                 elapsedTime: currentTime,
-                pipeRead: pipeQueue,
+                score: scoreUpdate,
+                gameOver: newGameOver,
+                pipeRead: pipeQueueUpdated,
                 pipeRendering: nextPipe,
+                rngSeed: rngSeed2,
             };
         }),
     );
