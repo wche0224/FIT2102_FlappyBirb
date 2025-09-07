@@ -61,7 +61,7 @@ const Bounce = {
 
 // User input
 
-type Key = "Space" | "KeyR";
+type Key = "Space" | "KeyR" | "KeyP";
 
 // State processing
 type Pipe = Readonly<{
@@ -93,6 +93,7 @@ type State = Readonly<{
     rngSeed: number;
     invinciblePipeTime?: number;
     ghostBirbPos?: number;
+    paused: boolean;
 }>;
 
 const initialState: State = {
@@ -104,6 +105,7 @@ const initialState: State = {
     score: 0,
     gameOver: false,
     rngSeed: Bounce.SEED,
+    paused: false,
 };
 
 /**
@@ -199,21 +201,16 @@ const render = (): ((s: State) => void) => {
      */
 
     return (s: State) => {
-        const gameEnd = s.gameOver || s.score === 20;
+        const gameEnd: boolean = s.gameOver || s.score === 20;
 
-        const prev = svg.querySelectorAll("image"); //remove sprites from previous state
-        prev.forEach(n => n.remove());
-        const prevPipes = svg.querySelectorAll("rect");
-        prevPipes.forEach(n => n.remove());
+        const prev: NodeListOf<SVGImageElement> = svg.querySelectorAll("image"); //remove sprites from previous state
+        prev.forEach((n: SVGImageElement) => n.remove());
+        const prevPipes: NodeListOf<SVGRectElement> =
+            svg.querySelectorAll("rect");
+        prevPipes.forEach((n: SVGRectElement) => n.remove());
 
-        //const prev = svg.querySelector("image");
-        //if (prev) svg.removeChild(prev);
-
-        // Draw a static pipe as a demonstration
-        //const prevPipes = svg.querySelectorAll("rect");
-        //if (prevPipes) prevPipes.forEach(n => n.remove());
-
-        const pipesOnCanvas = s.pipeRendering;
+        // Draw moving pipe
+        const pipesOnCanvas: Pipe[] | undefined = s.pipeRendering;
 
         if (pipesOnCanvas) pipesOnCanvas.forEach(createWholePipe);
 
@@ -272,7 +269,7 @@ const render = (): ((s: State) => void) => {
         scoreText.textContent = String(s.score);
         livesText.textContent = String(s.birbLives);
 
-        const msgUpdate = (msg: SVGTextElement, msgText: string) => {
+        const msgUpdate = (msg: SVGTextElement, msgText: string): void => {
             const line1 = document.createElementNS(svg.namespaceURI, "tspan");
             line1.setAttribute("x", msg.getAttribute("x")!); // align with parent <text> x
             line1.setAttribute("dy", "0"); // first line, no vertical offset
@@ -304,33 +301,8 @@ export const state$ = (csvContents: string): Observable<State> => {
     /** User input */
     const prevPathRef: {
         //reference to previous birb flap path
-        value: ReadonlyArray<{ t: number; y: number }> | undefined;
+        value: { t: number; y: number }[] | undefined;
     } = { value: undefined };
-
-    const makeGhostReducers = (
-        path: ReadonlyArray<{ t: number; y: number }>, //t is the elapsed time since time started, y is y position of bird
-    ) => {
-        if (!path.length) return EMPTY as Observable<(s: State) => State>; //if no recorded path
-
-        const totalTimeTravelled = path[path.length - 1].t; //total time the ghost birb was travelling
-
-        const lastIdxLE = (t: number): number =>
-            path.reduce((best, pt, i) => (pt.t <= t ? i : best), 0);
-
-        return interval(Constants.TICK_RATE_MS).pipe(
-            // emits 0, 1 , 2 ,...
-            map(i => i * Constants.TICK_RATE_MS), // convert to 0, 16, 32, ... (time in ms)
-            takeWhile(t => t <= totalTimeTravelled, true), // emit until the last recorded time of ghost birb, but add one extra tick
-            map(t => {
-                const inside = t <= totalTimeTravelled;
-                const y = inside ? path[lastIdxLE(t)].y : undefined;
-                return (s: State): State =>
-                    inside
-                        ? { ...s, ghostBirbPos: y as number }
-                        : { ...s, ghostBirbPos: undefined };
-            }),
-        );
-    };
 
     const pipeProperties: Pipe[] = csvContents // read csv file for pipes, and map them into an array as Pipe objects
         .split("\n")
@@ -360,8 +332,9 @@ export const state$ = (csvContents: string): Observable<State> => {
         });
 
     const key$ = fromEvent<KeyboardEvent>(document, "keypress"); //stream of keypress observables
-    const fromKey = (keyCode: Key) =>
-        key$.pipe(filter(e => e.code === keyCode));
+    const fromKey: (keyCode: Key) => Observable<KeyboardEvent> = (
+        keyCode: Key,
+    ) => key$.pipe(filter(e => e.code === keyCode));
 
     const flap$: Observable<(s: State) => State> = fromKey("Space").pipe(
         // change birbVelocity (gravity logic) if a space keypress is registered
@@ -382,7 +355,7 @@ export const state$ = (csvContents: string): Observable<State> => {
         Constants.TICK_RATE_MS,
     ).pipe(
         map(_ => (s: State) => {
-            if (s.gameOver || s.score === 20) return s; //stop state update if game end conditions are met
+            if (s.gameOver || s.score === 20 || s.paused) return s; //stop state update if game end conditions are met
 
             // update the properties regarding bird in state
             const updatedBirbVelocity = s.birbVelocity + Birb.GRAVITY;
@@ -390,7 +363,8 @@ export const state$ = (csvContents: string): Observable<State> => {
             const floor = Viewport.CANVAS_HEIGHT - Birb.HEIGHT;
 
             const pipeQueue: Pipe[] = s.pipeRead ?? pipeProperties; //read the csv content at the start, otherwise continue from previous state
-            const currentTime = performance.now() - s.timeStart;
+
+            const currentTime = s.elapsedTime + Constants.TICK_RATE_MS;
 
             const travel = Constants.PIPE_TRAVEL_MS; // ms
             const distance = Viewport.CANVAS_WIDTH + Constants.PIPE_WIDTH; // px
@@ -399,12 +373,12 @@ export const state$ = (csvContents: string): Observable<State> => {
 
             //all helper functions listed here:
             // clamp a ratio into [0,1]
-            const clamp01 = (x: number): number =>
+            const clampRatio = (x: number): number =>
                 x <= 0 ? 0 : x >= 1 ? 1 : x;
 
             // pipe xpos at given age
             const pipeXposAtAge = (age: number): number => {
-                const prog = clamp01(age / travel);
+                const prog = clampRatio(age / travel);
                 return Viewport.CANVAS_WIDTH - distance * prog;
             };
 
@@ -417,7 +391,21 @@ export const state$ = (csvContents: string): Observable<State> => {
             // which side was hit? true if  top side
             const hitTopSide = (p: Pipe, y: number): boolean => y <= p.gapTop;
 
-            const pipeQueueUpdated = pipeQueue.map(p => {
+            const ghostPath = prevPathRef.value;
+            const ghostBirbPos =
+                ghostPath && ghostPath.length
+                    ? currentTime <= ghostPath[ghostPath.length - 1].t
+                        ? ghostPath[
+                              ghostPath.reduce(
+                                  (best, pt, i) =>
+                                      pt.t <= currentTime ? i : best,
+                                  0,
+                              )
+                          ].y
+                        : undefined
+                    : s.ghostBirbPos;
+
+            const pipeQueueUpdated: Pipe[] = pipeQueue.map(p => {
                 //we are updating the pipes' property in the queue
                 const age = currentTime - p.time; // can be < 0 before spawn, so it will not just spawn at s.time >= p.time
                 const newX = pipeXposAtAge(age); // current frame xpos
@@ -441,21 +429,21 @@ export const state$ = (csvContents: string): Observable<State> => {
                 };
             });
 
-            const pipeQueuePass = pipeQueueUpdated // pipeQueuePass is used to store all pipes that has been rendered, not considering if it is currently rendering
+            const pipeQueuePass: Pipe[] = pipeQueueUpdated // pipeQueuePass is used to store all pipes that has been rendered, not considering if it is currently rendering
                 .filter(p => p.time <= currentTime);
 
-            const nextPipe = pipeQueuePass.filter(
+            const nextPipe: Pipe[] = pipeQueuePass.filter(
                 //Array of all pipes currently rendering
                 p => p.age >= 0 && p.age <= travel,
             ); // only pipes on screen
 
             //get the pipe that the bird is currently passing through
-            const currentPipePassing = pipeQueuePass.find(
+            const currentPipePassing: Pipe | undefined = pipeQueuePass.find(
                 p => p.birdPassing === true,
             );
 
             // clamp birb position into canvas
-            const updatedBirbPosition =
+            const updatedBirbPosition: number =
                 newBirbPositionUnbound <= 0
                     ? 0
                     : newBirbPositionUnbound >= floor
@@ -463,7 +451,7 @@ export const state$ = (csvContents: string): Observable<State> => {
                       : newBirbPositionUnbound;
 
             //check if birb hit canvas this frame
-            const hitCanvas =
+            const hitCanvas: boolean =
                 updatedBirbPosition === floor
                     ? true
                     : updatedBirbPosition === 0
@@ -473,20 +461,20 @@ export const state$ = (csvContents: string): Observable<State> => {
             const overlapping = currentPipePassing;
 
             // first contact with this pipe this frame, we use the time in the csv as an id
-            const firstHitThisPipe = !!(
+            const firstHitThisPipe: boolean = !!(
                 overlapping && // ensure the bird is currently overlapping with the pipe's x position
                 outsideGapY(overlapping, updatedBirbPosition) && //bird is not within the gap
                 s.invinciblePipeTime !== overlapping.time //check if we hit this pipe before
             );
 
-            // still overlapping the same pierced pipe from a previous frame?
-            const keepPiercing = !!(
+            // still overlapping the same phased pipe from a previous frame?
+            const keepPhasing: boolean = !!(
                 overlapping &&
                 s.invinciblePipeTime !== undefined && //so that bird is not invincible in the case it hasn't hit any pipe yet
-                s.invinciblePipeTime === overlapping.time //keep piercing if we already hit this pipe before
+                s.invinciblePipeTime === overlapping.time //keep phasing if we already hit this pipe before
             );
 
-            const isSideEntry =
+            const isSideEntry: boolean =
                 // we always use !! if the variables could be null to get false for null
                 !!(overlapping && firstHitThisPipe) && //is this the first time hitting
                 !overlapping.prevPassing && //if the previous state of the pipe's birdPassing property is false
@@ -497,18 +485,18 @@ export const state$ = (csvContents: string): Observable<State> => {
                 (firstHitThisPipe && overlapping && !isSideEntry)
             );
 
-            const newBirbPosition = shouldClamp //update the bird position again accordingly to pipe's hitbox logic
+            const newBirbPosition: number = shouldClamp //update the bird position again accordingly to pipe's hitbox logic
                 ? clampToPipeGap(overlapping, updatedBirbPosition)
                 : updatedBirbPosition;
 
             // check if it hit top or bottom, true if hit top
-            const hitTopSidePipe = !!(
+            const hitPipeTop: boolean = !!(
                 firstHitThisPipe &&
                 overlapping &&
                 hitTopSide(overlapping, updatedBirbPosition)
             );
 
-            const hitCanvasTop = updatedBirbPosition === 0;
+            const hitCanvasTop: boolean = updatedBirbPosition === 0;
 
             const collideFrame: boolean = firstHitThisPipe || hitCanvas; //hit anything this frame?
 
@@ -518,14 +506,14 @@ export const state$ = (csvContents: string): Observable<State> => {
             const bounce = collideFrame ? Bounce.MEAN + Bounce.SPREAD * r : 0;
 
             //birb velocity is updated to the calculated value if no collide, otherwise updated to the randomized velocity
-            const newBirbVelocity = !collideFrame
+            const newBirbVelocity: number = !collideFrame
                 ? updatedBirbVelocity
-                : hitCanvasTop || hitTopSidePipe
+                : hitCanvasTop || hitPipeTop
                   ? bounce
                   : -bounce;
 
             //check if we need to reduce live
-            const newBirbLives =
+            const newBirbLives: number =
                 firstHitThisPipe || hitCanvas
                     ? s.birbLives - 1 <= 0
                         ? 0
@@ -533,21 +521,21 @@ export const state$ = (csvContents: string): Observable<State> => {
                     : s.birbLives;
 
             //update pipe ID checker (according to csv file's time property for pipes)
-            const invinciblePipeTime2 =
+            const invinciblePipeTime2: number | undefined =
                 firstHitThisPipe && overlapping
                     ? overlapping.time
-                    : keepPiercing
+                    : keepPhasing
                       ? s.invinciblePipeTime
                       : undefined;
 
             // update the score according to how many pipes passed
-            const scoreUpdate = pipeQueuePass.filter(
-                p => p.passed === true,
+            const scoreUpdate: number = pipeQueuePass.filter(
+                (p: Pipe) => p.passed === true,
             ).length;
 
             const newGameOver: boolean = newBirbLives === 0 ? true : false; //false if game is still ongoing, true if lost
 
-            const rngSeed2 = collideFrame ? seed1 : s.rngSeed; //update seed
+            const rngSeed2: number = collideFrame ? seed1 : s.rngSeed; //update seed
 
             return {
                 ...s,
@@ -561,8 +549,23 @@ export const state$ = (csvContents: string): Observable<State> => {
                 pipeRendering: nextPipe,
                 rngSeed: rngSeed2,
                 invinciblePipeTime: invinciblePipeTime2,
+                ghostBirbPos,
             };
         }),
+    );
+
+    //check if pause is toggled
+    const pause$ = fromKey("KeyP").pipe(
+        // flip a boolean each time P is pressed
+        scan((acc, _) => !acc, false),
+        startWith(false),
+    );
+
+    const pauseState$ = pause$.pipe(
+        map(paused => (s: State) => ({
+            ...s,
+            paused, //the pause$ emits booleans, just change the state's paused property according to that
+        })),
     );
 
     const restart$ = fromKey("KeyR"); //press R to restart game
@@ -570,38 +573,36 @@ export const state$ = (csvContents: string): Observable<State> => {
     return restart$.pipe(
         startWith(null), // start on load, so at the start before first R key it acts as the first signal to start game
         switchMap(() => {
-            const ghost$ =
-                prevPathRef.value && prevPathRef.value.length
-                    ? makeGhostReducers(prevPathRef.value)
-                    : EMPTY;
-
-            const reducers$: Observable<(s: State) => State> = merge(
-                flap$,
-                tick$,
-                ghost$,
+            //game foundation is ran on flap$ and tick$ reducers, we merge inside here
+            const gatedGame$ = pause$.pipe(
+                switchMap(paused => (paused ? EMPTY : merge(flap$, tick$))), //if paused, no reducers is applied on state so it stops updating
             );
 
-            const currentPath: ReadonlyArray<{ t: number; y: number }> = [];
+            const reducers$: Observable<(s: State) => State> = merge(
+                pauseState$, //not included in gateGame$ since it would not update the paused property in state if we did
+                gatedGame$,
+            );
+
+            const currentPath: { t: number; y: number }[] = [];
 
             const runState$ = reducers$.pipe(
                 //observables that return a function that updates state
                 scan((state, reducerFn) => reducerFn(state), {
-                    ...initialState,
-                    timeStart: performance.now(), // timeStart has to be recalculated or the new initial state just continues time progression
+                    ...initialState, // reset state to initial state
                 }),
                 takeWhile(s => !(s.gameOver || s.score === 20), true),
                 // sample position vs elapsed time
-                // tap doesn't change the stream, just observes it then applies the observable's values to the currentPath array
+                // tap observes stream's elapsedTime and birdPosition and pushes the values to the currentPath array
                 tap(s =>
                     (currentPath as { t: number; y: number }[]).push({
                         t: s.elapsedTime,
                         y: s.birbPosition,
                     }),
                 ),
-                // save for the next run
+                // exactly the same as source observable (everything above) and calls a function to update ghost when the source terminates
                 finalize(() => {
                     if (currentPath.length) {
-                        prevPathRef.value = currentPath; //change the reference to previous path's value property to the current path
+                        prevPathRef.value = currentPath; //change the reference to previous path's value property to the current path, update ghost for next game
                     }
                 }),
             );
