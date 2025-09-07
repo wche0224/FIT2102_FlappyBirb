@@ -176,6 +176,11 @@ const createSvgElement = (
     return elem;
 };
 
+/**
+ * renders the game according to state given after going through reducers
+ *
+ * @param s State of game
+ */
 const render = (): ((s: State) => void) => {
     // Canvas elements
     const gameOver = document.querySelector("#gameOver") as SVGElement;
@@ -269,6 +274,12 @@ const render = (): ((s: State) => void) => {
         scoreText.textContent = String(s.score);
         livesText.textContent = String(s.birbLives);
 
+        /**
+         * render the message texts
+         *
+         * @param msg the SVGTextElement, the message board
+         * @param msgText what should the message say
+         */
         const msgUpdate = (msg: SVGTextElement, msgText: string): void => {
             const line1 = document.createElementNS(svg.namespaceURI, "tspan");
             line1.setAttribute("x", msg.getAttribute("x")!); // align with parent <text> x
@@ -299,6 +310,7 @@ const render = (): ((s: State) => void) => {
 
 export const state$ = (csvContents: string): Observable<State> => {
     /** User input */
+
     const prevPathRef: {
         //reference to previous birb flap path
         value: { t: number; y: number }[] | undefined;
@@ -331,11 +343,20 @@ export const state$ = (csvContents: string): Observable<State> => {
             };
         });
 
+    /** Observable of KeyboardEvents */
     const key$ = fromEvent<KeyboardEvent>(document, "keypress"); //stream of keypress observables
+
+    /**
+     * Filters key press on keyboard
+     *
+     * @param keycode what key to filter
+     * @returns Observable of filtered KeyboardEvents
+     */
     const fromKey: (keyCode: Key) => Observable<KeyboardEvent> = (
         keyCode: Key,
     ) => key$.pipe(filter(e => e.code === keyCode));
 
+    /** Determines whether to change the birbVelocity(gravity) to flap  */
     const flap$: Observable<(s: State) => State> = fromKey("Space").pipe(
         // change birbVelocity (gravity logic) if a space keypress is registered
         map(
@@ -371,39 +392,71 @@ export const state$ = (csvContents: string): Observable<State> => {
             const BIRB_X = Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2;
             const BIRB_REAR = BIRB_X + Birb.WIDTH;
 
-            //all helper functions listed here:
-            // clamp a ratio into [0,1]
+            //all helper functions listed here
+            /**
+             * clamp a ratio into [0,1]
+             *
+             * @param x number
+             * @returns number between 0 to 1
+             */
             const clampRatio = (x: number): number =>
                 x <= 0 ? 0 : x >= 1 ? 1 : x;
 
-            // pipe xpos at given age
+            /**
+             * pipe xpos at given age
+             *
+             * @param age pipe's age
+             * @returns pipe's xpos
+             */
             const pipeXposAtAge = (age: number): number => {
                 const prog = clampRatio(age / travel);
                 return Viewport.CANVAS_WIDTH - distance * prog;
             };
 
-            // Clamp a y into the pipe’s gap
+            /**
+             * Clamp a y into the pipe’s gap
+             *
+             * @param p Passing pipe
+             * @param y Birb y position
+             * @returns updated birb y position
+             */
             const clampToPipeGap = (p: Pipe, y: number): number =>
                 y <= p.gapTop ? p.gapTop : y >= p.gapBottom ? p.gapBottom : y;
-            // birb outside the gap vertically?
+
+            /**
+             * Birb outside the pipe's gap vertically?
+             *
+             * @param p Passing pipe
+             * @param y Birb y position
+             * @returns boolean, true if outside of gap
+             */
             const outsideGapY = (p: Pipe, y: number): boolean =>
                 y <= p.gapTop || y >= p.gapBottom;
-            // which side was hit? true if  top side
+
+            /**
+             * Which side is hit?
+             *
+             * @param p Passing pipe
+             * @param y Birb y position
+             * @returns boolean, true if it is top false otherwise
+             */
             const hitTopSide = (p: Pipe, y: number): boolean => y <= p.gapTop;
 
-            const ghostPath = prevPathRef.value;
+            const ghostPath = prevPathRef.value; //take the path of previous game's birb
+            //get ghost birb position through running calculations on the array
             const ghostBirbPos =
-                ghostPath && ghostPath.length
-                    ? currentTime <= ghostPath[ghostPath.length - 1].t
+                ghostPath && ghostPath.length //if it is not undefined
+                    ? currentTime <= ghostPath[ghostPath.length - 1].t // has ghost birb died yet?
                         ? ghostPath[
                               ghostPath.reduce(
+                                  //reduce to get the best fitting birb path for the current time
                                   (best, pt, i) =>
                                       pt.t <= currentTime ? i : best,
                                   0,
                               )
                           ].y
                         : undefined
-                    : s.ghostBirbPos;
+                    : s.ghostBirbPos; //doesnt update
 
             const pipeQueueUpdated: Pipe[] = pipeQueue.map(p => {
                 //we are updating the pipes' property in the queue
@@ -554,13 +607,14 @@ export const state$ = (csvContents: string): Observable<State> => {
         }),
     );
 
-    //check if pause is toggled
+    /** check if pause is toggled */
     const pause$ = fromKey("KeyP").pipe(
         // flip a boolean each time P is pressed
         scan((acc, _) => !acc, false),
         startWith(false),
     );
 
+    /** reducer to change the state's paused according to the pause$ observable */
     const pauseState$ = pause$.pipe(
         map(paused => (s: State) => ({
             ...s,
@@ -568,23 +622,26 @@ export const state$ = (csvContents: string): Observable<State> => {
         })),
     );
 
-    const restart$ = fromKey("KeyR"); //press R to restart game
+    /** Filter R press for restart */
+    const restart$ = fromKey("KeyR");
 
     return restart$.pipe(
         startWith(null), // start on load, so at the start before first R key it acts as the first signal to start game
         switchMap(() => {
-            //game foundation is ran on flap$ and tick$ reducers, we merge inside here
+            //** game foundation is ran on flap$ and tick$ reducers, we merge inside here, resets both reducer on p press */
             const gatedGame$ = pause$.pipe(
                 switchMap(paused => (paused ? EMPTY : merge(flap$, tick$))), //if paused, no reducers is applied on state so it stops updating
             );
 
+            //** all reducers that apply change to game state */
             const reducers$: Observable<(s: State) => State> = merge(
                 pauseState$, //not included in gateGame$ since it would not update the paused property in state if we did
                 gatedGame$,
             );
 
-            const currentPath: { t: number; y: number }[] = [];
+            const currentPath: { t: number; y: number }[] = []; //to store path in current game to be used for next game
 
+            //** cohesion of all the reducers to run the game together */
             const runState$ = reducers$.pipe(
                 //observables that return a function that updates state
                 scan((state, reducerFn) => reducerFn(state), {
