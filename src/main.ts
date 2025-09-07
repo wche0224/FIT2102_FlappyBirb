@@ -104,7 +104,7 @@ const initialState: State = {
     elapsedTime: 0,
     score: 0,
     gameOver: false,
-    rngSeed: Bounce.SEED,
+    rngSeed: performance.now(),
     paused: false,
 };
 
