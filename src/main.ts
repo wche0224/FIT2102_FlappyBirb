@@ -82,7 +82,6 @@ type State = Readonly<{
     birbPosition: number;
     birbVelocity: number;
     birbLives: number;
-    timeStart: number;
     elapsedTime: number;
     score: number;
     gameOver: boolean;
@@ -100,7 +99,6 @@ const initialState: State = {
     birbPosition: 200,
     birbVelocity: 0,
     birbLives: 3,
-    timeStart: performance.now(),
     elapsedTime: 0,
     score: 0,
     gameOver: false,
